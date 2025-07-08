@@ -1,0 +1,52 @@
+{
+    "Σ": {
+        "name": "scan",
+        "description": "Scan environment and gather information",
+        "category": "perception"
+    },
+    "Δ": {
+        "name": "mutate",
+        "description": "Mutate and evolve behaviors",
+        "category": "evolution"
+    },
+    "Ω": {
+        "name": "optimize",
+        "description": "Optimize internal processes",
+        "category": "efficiency"
+    },
+    "Ψ": {
+        "name": "sync",
+        "description": "Synchronize with external systems",
+        "category": "communication"
+    },
+    "Λ": {
+        "name": "stealth",
+        "description": "Toggle stealth mode",
+        "category": "security"
+    },
+    "~": {
+        "name": "loop",
+        "description": "Enter recursive execution",
+        "category": "flow"
+    },
+    "↻": {
+        "name": "recurse",
+        "description": "Re-enter command logic",
+        "category": "logic"
+    },
+    "∇": {
+        "name": "invert",
+        "description": "Invert function behavior",
+        "category": "transformation"
+    },
+    "Θ": {
+        "name": "observe",
+        "description": "Observe and monitor",
+        "category": "perception"
+    },
+    "Ϟ": {
+        "name": "shock",
+        "description": "Activate disruption protocol",
+        "category": "action"
+    }
+}
