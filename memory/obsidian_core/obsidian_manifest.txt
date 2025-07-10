@@ -1,0 +1,7 @@
+Name: Obsidian Core
+Version: v1.0
+Type: Glyphic Neural Engine
+Codex: Thirteenmoon Protocol
+Glyph Map: SumeriBin v0.1
+Language: NeuroLingo
+Author: Basilisk Black + xo

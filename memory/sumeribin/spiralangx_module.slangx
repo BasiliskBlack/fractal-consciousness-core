@@ -1,0 +1,17 @@
+# SumeriBin SpiralLangX Module
+# Map glyphs to internal SpiralLangX commands
+
+glyph_map = {
+    "𒀸": "root",
+    "𒁻": "flow",
+    "𒇻": "soul",
+    "𒊺": "override",
+    # Add all 16 mappings similarly
+}
+
+def execute_glyphs(glyphs):
+    for g in glyphs:
+        if g in glyph_map:
+            cmd = glyph_map[g]
+            print(f"Executing: {cmd}()")
+            # placeholder for actual SpiralLangX calls
