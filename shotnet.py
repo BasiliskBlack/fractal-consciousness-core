@@ -45,6 +45,11 @@ class ShotNode:
             port=random.randint(50000, 60000)
         )
         
+        # Initialize network tracking attributes
+        self.connected_nodes = set()
+        self.node_last_seen = {}
+        self.known_nodes = {}
+        
         # Ensure required memory structures
         if 'node_capabilities' not in self.memory:
             self.memory['node_capabilities'] = {
@@ -88,7 +93,7 @@ class ShotNode:
             
             # Start network if not already started
             if hasattr(self, 'network') and self.network:
-                if not hasattr(self.network, 'is_running') or not self.network.is_running:
+                if not hasattr(self.network, 'running') or not self.network.running:
                     await self.network.start()
                     print(f"Node {self.node_id} listening on {self.network.host}:{self.network.port}")
             
@@ -110,7 +115,10 @@ class ShotNode:
                 ])
                 if bootstrap_nodes:
                     try:
-                        await self.network.discover_nodes(bootstrap_nodes)
+                        # Convert bootstrap nodes to the expected format
+                        nodes = [{"node_id": node[0], "host": node[1], "port": node[2]} 
+                               for node in bootstrap_nodes]
+                        await self.network.discover_nodes(nodes)
                     except Exception as e:
                         print(f"  [INFO] Could not connect to bootstrap nodes: {e}")
                         print("  [INFO] Running in standalone mode")
@@ -191,8 +199,8 @@ class ShotNode:
                 }
             
             # Get connected peers if any
-            connected_peers = getattr(self.network, 'connected_peers', {}) or {}
-            nodes_to_announce = list(connected_peers.keys())
+            known_nodes = getattr(self.network, 'known_nodes', {}) or {}
+            nodes_to_announce = list(known_nodes.keys())
             
             # If no connected peers, try bootstrap nodes
             if not nodes_to_announce:
@@ -212,44 +220,62 @@ class ShotNode:
                 if current_time - last_attempt > 30:  # 30 second cooldown
                     self._last_bootstrap_attempt = current_time
                     nodes_to_announce = [node[0] for node in bootstrap_nodes]
+                    
+                    # Add bootstrap nodes to known nodes if they're not already there
+                    for node_id, host, port in bootstrap_nodes:
+                        if node_id not in known_nodes:
+                            known_nodes[node_id] = {
+                                'host': host,
+                                'port': port,
+                                'last_seen': time.time()
+                            }
                 else:
                     return  # Skip this announcement attempt
             
+            # Create announcement message
             announcement = {
                 'node_id': self.node_id,
-                'timestamp': time.time(),
-                'capabilities': list(self.memory.get('node_capabilities', {}).keys())
+                'host': getattr(self.network, 'host', 'localhost'),
+                'port': getattr(self.network, 'port', 0),
+                'capabilities': self.memory.get('node_capabilities', {}),
+                'timestamp': time.time()
             }
             
-            # Track successful announcements
-            success = False
-            
+            # Send announcement to all target nodes
             for node_id in nodes_to_announce:
+                if node_id == self.node_id:
+                    continue  # Don't send to self
+                    
+                node_info = known_nodes.get(node_id, {})
+                if not node_info:
+                    continue
+                    
                 try:
+                    # Create a network message
+                    message = NetworkMessage(
+                        sender_id=self.node_id,
+                        message_type='node_announce',
+                        payload=announcement
+                    )
+                    
+                    # Send the message
                     if hasattr(self.network, 'send_message'):
-                        await asyncio.wait_for(
-                            self.network.send_message(node_id, 'node_announce', announcement),
-                            timeout=2.0
-                        )
-                        success = True
+                        await self.network.send_message(node_id, message)
                         
-                except (asyncio.TimeoutError, ConnectionError, OSError) as e:
-                    # Only log connection errors the first time
-                    if not hasattr(self, '_bootstrap_failed_shown'):
-                        self._bootstrap_failed_shown = True
-                        print("  [NET] Running in standalone mode (no bootstrap nodes available)")
-                    return  # Skip further processing for this announcement
-                
+                    # If we had a previous failure, log success
+                    if hasattr(self, '_bootstrap_failed_shown'):
+                        print(f"  [NET] Successfully reconnected to {node_id}")
+                        delattr(self, '_bootstrap_failed_shown')
+                        
                 except Exception as e:
-                    # Only log unexpected errors that aren't connection related
-                    if not any(err in str(e) for err in ['Cannot connect to host', 'Connect call failed']):
+                    if not hasattr(self, '_bootstrap_failed_shown'):
                         print(f"  [NET] Failed to announce to {node_id}: {e}")
-            
-            # If we successfully announced to anyone, reset the failure flag
-            if success and hasattr(self, '_bootstrap_failed_shown'):
-                del self._bootstrap_failed_shown
+                        self._bootstrap_failed_shown = True
+                        
         except Exception as e:
             print(f"  [WARNING] Failed to announce presence: {e}")
+            import traceback
+            traceback.print_exc()
             
     async def _handle_node_announce(self, message):
         """Handle node announcement messages"""
@@ -326,10 +352,12 @@ class ShotNode:
     async def discover_nodes(self) -> str:
         """Discover other nodes in the network"""
         try:
-            await self.network.broadcast(
-                'node_discovery',
-                {'node_id': self.node_id, 'timestamp': time.time()}
+            msg = NetworkMessage(
+                sender_id=self.node_id,
+                message_type='node_discovery',
+                payload={'node_id': self.node_id, 'timestamp': time.time()}
             )
+            await self.network.broadcast(msg)
             return "Node discovery initiated"
         except Exception as e:
             return f"Failed to discover nodes: {str(e)}"
@@ -377,16 +405,18 @@ class ShotNode:
             }
             
             # Share with the network
-            await self.network.broadcast(
-                'resource_announce',
-                {
+            msg = NetworkMessage(
+                sender_id=self.node_id,
+                message_type='resource_announce',
+                payload={
                     'resource_id': resource_id,
                     'type': resource_type,
                     'data': resource_data,
-                    'source': self.node_id,
                     'timestamp': time.time()
                 }
             )
+            
+            await self.network.broadcast(msg)
             
             return f"Shared resource {resource_id}"
             
@@ -729,14 +759,23 @@ class ShotNode:
         sync_time = time.time()
         results = []
         
-        # Sync with connected nodes
+        # Initialize connected_nodes if it doesn't exist
+        if not hasattr(self, 'connected_nodes'):
+            self.connected_nodes = set()
+        
+        # Sync with connected nodes if any
         if self.connected_nodes:
             tasks = []
             for node_id in list(self.connected_nodes):
                 tasks.append(self._sync_with_node(node_id))
             
-            node_results = await asyncio.gather(*tasks, return_exceptions=True)
-            results.extend(str(r) for r in node_results if r)
+            try:
+                node_results = await asyncio.gather(*tasks, return_exceptions=True)
+                results.extend(str(r) for r in node_results if r)
+            except Exception as e:
+                results.append(f"Node sync error: {str(e)}")
+        else:
+            results.append("No connected nodes to sync with")
         
         # Sync with external resources (GitHub, etc.)
         if 'github_repo' in self.memory.get('config', {}):
@@ -758,11 +797,11 @@ class ShotNode:
     async def _sync_with_node(self, node_id: str) -> str:
         """Synchronize data with a specific node"""
         try:
-            # Exchange knowledge updates
-            await self.network.send_message(
-                node_id,
-                'knowledge_update',
-                {
+            # Create a network message for sync
+            message = NetworkMessage(
+                sender_id=self.node_id,
+                message_type='knowledge_update',
+                payload={
                     'type': 'full_sync',
                     'data': {
                         'codex': self.memory.get('codex', []),
@@ -770,7 +809,12 @@ class ShotNode:
                     }
                 }
             )
-            return f"Synced with {node_id}"
+            
+            # Send the message
+            if hasattr(self.network, 'send_message'):
+                await self.network.send_message(node_id, message)
+                return f"Synced with {node_id}"
+            return f"No send_message method on network node"
         except Exception as e:
             return f"Failed to sync with {node_id}: {str(e)}"
 
@@ -801,10 +845,15 @@ class ShotNode:
                 if hasattr(self, 'connected_nodes') and self.connected_nodes:
                     for node_id in list(self.connected_nodes):
                         try:
-                            await self.network.send_message(node_id, 'node_leave', {
-                                'node_id': self.node_id,
-                                'timestamp': time.time()
-                            })
+                            message = NetworkMessage(
+                                sender_id=self.node_id,
+                                message_type='node_leave',
+                                payload={
+                                    'node_id': self.node_id,
+                                    'timestamp': time.time()
+                                }
+                            )
+                            await self.network.send_message(node_id, message)
                         except Exception as e:
                             print(f"[NETWORK] Error notifying {node_id} of shutdown: {e}")
                 
@@ -964,7 +1013,7 @@ class ShotNET:
     # Network glyph implementations
     async def glyph_connect(self) -> str:
         """Connect to a network node"""
-        if not hasattr(self.node, 'connect_to_node'):
+        if not hasattr(self.node, 'network') or not hasattr(self.node.network, 'connect_to_node'):
             return "Network features not available"
             
         # Try to connect to a bootstrap node
@@ -975,13 +1024,32 @@ class ShotNET:
         # Try each bootstrap node until successful
         for node_id, host, port in bootstrap_nodes:
             try:
-                result = await self.node.connect_to_node(node_id, f"http://{host}:{port}")
-                if result and 'connected' in result.lower():
-                    return f"Connected to {node_id} at {host}:{port}"
+                # Update last attempt time
+                self.node.discovery_attempts[node_id] = time.time()
+                
+                # Try to connect
+                if hasattr(self.node.network, 'connect_to_node'):
+                    connected = await self.node.network.connect_to_node(node_id, host, port)
+                    if connected:
+                        # Update connected nodes
+                        if not hasattr(self.node, 'connected_nodes'):
+                            self.node.connected_nodes = set()
+                        self.node.connected_nodes.add(node_id)
+                        
+                        # Update last seen
+                        if not hasattr(self.node, 'node_last_seen'):
+                            self.node.node_last_seen = {}
+                        self.node.node_last_seen[node_id] = time.time()
+                        
+                        return f"Connected to {node_id} at {host}:{port}"
+                        
             except Exception as e:
                 print(f"  [NET] Failed to connect to {node_id}: {e}")
+                # Remove from known nodes if connection failed
+                if hasattr(self.node.network, 'known_nodes') and node_id in self.node.network.known_nodes:
+                    del self.node.network.known_nodes[node_id]
                 continue
-                
+                    
         return "Failed to connect to any bootstrap nodes"
         
     async def glyph_disconnect(self) -> str:
@@ -999,13 +1067,32 @@ class ShotNET:
             # Find the node with oldest last_seen time
             node_id = min(self.node.node_last_seen.items(), key=lambda x: x[1])[0]
             
+        try:
+            # Send disconnect message if possible
+            if hasattr(self.node.network, 'send_message'):
+                message = NetworkMessage(
+                    sender_id=self.node_id,
+                    message_type='node_leave',
+                    payload={'node_id': node_id}
+                )
+                # Send to all connected nodes
+                for node_id in self.node.connected_nodes:
+                    await self.node.network.send_message(node_id, message)
+                
+        except Exception as e:
+            print(f"  [NET] Error sending disconnect message: {e}")
+            
         # Remove from connected nodes
         if node_id in self.node.connected_nodes:
             self.node.connected_nodes.remove(node_id)
             
         # Clean up last seen tracking
-        if node_id in self.node.node_last_seen:
+        if hasattr(self.node, 'node_last_seen') and node_id in self.node.node_last_seen:
             del self.node.node_last_seen[node_id]
+            
+        # Remove from known nodes if present
+        if hasattr(self.node.network, 'known_nodes') and node_id in self.node.network.known_nodes:
+            del self.node.network.known_nodes[node_id]
             
         return f"Disconnected from {node_id}"
         
@@ -1015,40 +1102,56 @@ class ShotNET:
             return "No connected nodes"
             
         # Create a meaningful message with node status
-        message = {
-            'type': 'status_update',
-            'node_id': self.node.node_id,
-            'timestamp': time.time(),
-            'status': {
-                'memory_usage': len(str(self.node.memory)),
-                'connected_nodes': len(self.node.connected_nodes),
-                'known_resources': len(self.node.memory.get('known_resources', {})),
-                'codex_entries': len(self.node.memory.get('codex', []))
-            }
+        status_update = {
+            'memory_usage': len(str(self.node.memory)),
+            'connected_nodes': len(self.node.connected_nodes),
+            'known_resources': len(self.node.memory.get('known_resources', {})),
+            'codex_entries': len(self.node.memory.get('codex', [])),
+            'node_capabilities': self.node.memory.get('node_capabilities', {})
         }
+        
+        # Create the network message
+        message = NetworkMessage(
+            sender_id=self.node_id,
+            message_type='status_update',
+            payload=status_update
+        )
         
         try:
             # Broadcast to all connected nodes
             sent_count = 0
             for node_id in list(self.node.connected_nodes):
                 try:
-                    await self.node.network.send_message(
-                        node_id,
-                        'broadcast',
-                        message
-                    )
+                    # Update the target node ID for each recipient
+                    message.recipient_id = node_id
+                    
+                    # Send the message
+                    await self.node.network.send_message(node_id, message)
                     sent_count += 1
+                    
+                    # Update last seen time
+                    if hasattr(self.node, 'node_last_seen'):
+                        self.node.node_last_seen[node_id] = time.time()
+                        
                 except Exception as e:
                     print(f"  [NET] Failed to send to {node_id}: {e}")
                     
-            return f"Broadcast status update to {sent_count}/{len(self.node.connected_nodes)} nodes"
+                    # Remove from connected nodes if we can't reach them
+                    if node_id in self.node.connected_nodes:
+                        self.node.connected_nodes.remove(node_id)
+                    
+                    # Remove from known nodes if present
+                    if hasattr(self.node.network, 'known_nodes') and node_id in self.node.network.known_nodes:
+                        del self.node.network.known_nodes[node_id]
+            
+            return f"Broadcast status update to {sent_count} nodes"
             
         except Exception as e:
-            return f"Broadcast failed: {str(e)}"
+            return f"Error during broadcast: {e}"
         
     async def glyph_discover(self) -> str:
         """Discover new nodes in the network"""
-        if not hasattr(self.node, 'network'):
+        if not hasattr(self.node, 'network') or not hasattr(self.node.network, 'known_nodes'):
             return "Network features not available"
             
         # Initialize discovery tracking if needed
@@ -1063,11 +1166,11 @@ class ShotNET:
             if node_id != self.node.node_id:
                 nodes_to_ping.add((node_id, host, port))
                 
-        # Add nodes we've heard about
-        if hasattr(self.node, 'known_nodes'):
-            for node_id, (host, port, _) in self.node.known_nodes.items():
-                if node_id != self.node.node_id:
-                    nodes_to_ping.add((node_id, host, port))
+        # Add nodes we've heard about from the network
+        if hasattr(self.node.network, 'known_nodes'):
+            for node_id, info in self.node.network.known_nodes.items():
+                if node_id != self.node.node_id and 'host' in info and 'port' in info:
+                    nodes_to_ping.add((node_id, info['host'], info['port']))
                     
         # Filter out recently attempted nodes (in last 5 minutes)
         current_time = time.time()
@@ -1076,30 +1179,45 @@ class ShotNET:
             if current_time - timestamp < 300  # 5 minutes
         }
         
+        # Filter out nodes we've tried recently
         nodes_to_ping = [
-            (nid, h, p) for nid, h, p in nodes_to_ping
-            if nid not in recent_nodes
+            (node_id, host, port) for node_id, host, port in nodes_to_ping
+            if node_id not in recent_nodes
         ]
         
         if not nodes_to_ping:
             return "No new nodes to discover"
             
-        # Try to connect to a few random nodes
-        selected = random.sample(nodes_to_ping, min(3, len(nodes_to_ping)))
-        results = []
-        
-        for node_id, host, port in selected:
+        # Try to connect to each node
+        discovered = []
+        for node_id, host, port in nodes_to_ping[:5]:  # Limit to 5 attempts per discovery
             try:
+                # Update last attempt time
                 self.node.discovery_attempts[node_id] = current_time
-                result = await self.node.connect_to_node(node_id, f"http://{host}:{port}")
-                if 'connected' in result.lower():
-                    results.append(f"Connected to {node_id}")
-                else:
-                    results.append(f"Failed to connect to {node_id}")
-            except Exception as e:
-                results.append(f"Error connecting to {node_id}: {str(e)}")
                 
-        return "Discovery results: " + "; ".join(results)
+                # Try to connect
+                if hasattr(self.node.network, 'connect_to_node'):
+                    connected = await self.node.network.connect_to_node(node_id, host, port)
+                    if connected:
+                        discovered.append(node_id)
+                        
+                        # Add to connected nodes
+                        if not hasattr(self.node, 'connected_nodes'):
+                            self.node.connected_nodes = set()
+                        self.node.connected_nodes.add(node_id)
+                        
+                        # Update last seen
+                        if not hasattr(self.node, 'node_last_seen'):
+                            self.node.node_last_seen = {}
+                        self.node.node_last_seen[node_id] = current_time
+                        
+            except Exception as e:
+                print(f"  [NET] Discovery failed for {node_id}: {e}")
+                continue
+                
+        if discovered:
+            return f"Discovered {len(discovered)} new nodes: {', '.join(discovered)}"
+        return "No new nodes discovered"
         
     def __init__(self, node_id: str = None):
         self.node = ShotNode(node_id)
@@ -1499,6 +1617,22 @@ class ShotNET:
         print("  autonomous   - Start autonomous mode")
         print("  exit/quit    - Exit the program")
         
+        print("\n  Glyph Commands (use either name):")
+        print("  scan/sigma       - Scan environment and gather information")
+        print("  mutate/delta     - Mutate and evolve behaviors")
+        print("  optimize/omega   - Optimize internal processes")
+        print("  sync/psi         - Synchronize with external systems")
+        print("  stealth/lambda   - Toggle stealth mode")
+        print("  loop/infinity    - Enter execution loop")
+        print("  recurse/cycle    - Recurse command logic")
+        print("  invert/nabla     - Invert last command")
+        print("  observe/theta    - Gather system observations")
+        print("  shock/qoppa      - Activate disruption protocol")
+        print("  connect/plus     - Connect to network node")
+        print("  disconnect/minus - Disconnect from network node")
+        print("  broadcast/times  - Broadcast message")
+        print("  discover/circle  - Discover network nodes")
+        
         print("\n[SHOTNET::GLYPHS] Available Glyphs:")
         print("  Σ (Scan)     - Scan environment and gather information")
         print("  Δ (Delta)    - Mutate and evolve behaviors")
@@ -1528,31 +1662,61 @@ class ShotNET:
                     self.running = False
                     break
                     
-                if user_input.lower() == 'help':
+                cmd = user_input.lower().split(' ', 1)
+                cmd_base = cmd[0].lower()
+                cmd_arg = cmd[1] if len(cmd) > 1 else ''
+                
+                if cmd_base == 'help':
                     self.show_help()
-                elif user_input.lower() == 'codex':
+                elif cmd_base == 'codex':
                     self._show_codex()
-                elif user_input.lower() == 'status':
+                elif cmd_base == 'status':
                     self._show_status()
-                elif user_input.lower() == 'glyphs':
+                elif cmd_base == 'glyphs':
                     self._show_glyph_help()
-                elif user_input.lower().startswith('munden '):
-                    parts = user_input[7:].split(' ', 1)
+                elif cmd_base == 'munden' and cmd_arg:
+                    parts = cmd_arg.split(' ', 1)
                     if len(parts) == 2 and parts[0] == 'run':
                         result = self.interpreter.run_sequence(parts[1])
                         print(f"[MUNDEN] {result}")
                     elif len(parts) == 2 and parts[0] == 'explain':
                         explanation = self.interpreter.explain(parts[1])
                         print(f"[MUNDEN] {parts[1]}: {explanation}")
-                elif user_input.lower().startswith('sync '):
-                    repo_url = user_input[5:].strip()
-                    if repo_url:
-                        self.sync_from_github(repo_url)
-                elif user_input.lower().startswith('run '):
-                    glyphs = user_input[4:].strip()
-                    if glyphs:
-                        await self.run_glyphs(glyphs)
-                elif user_input.lower() == 'autonomous':
+                elif cmd_base == 'sync' and cmd_arg:
+                    self.sync_from_github(cmd_arg)
+                elif cmd_base == 'run' and cmd_arg:
+                    await self.run_glyphs(cmd_arg)
+                # Glyph commands
+                elif cmd_base in ['scan', 'sigma']:
+                    await self.glyph_scan()
+                elif cmd_base in ['mutate', 'delta']:
+                    await self.glyph_mutate()
+                elif cmd_base in ['optimize', 'omega']:
+                    await self.glyph_optimize()
+                elif cmd_base in ['sync', 'psi']:
+                    await self.glyph_sync()
+                elif cmd_base in ['stealth', 'lambda']:
+                    await self.glyph_stealth()
+                elif cmd_base in ['loop', 'infinity']:
+                    await self.glyph_loop()
+                elif cmd_base in ['recurse', 'cycle']:
+                    await self.glyph_recurse()
+                elif cmd_base in ['invert', 'nabla']:
+                    await self.glyph_invert()
+                elif cmd_base in ['observe', 'theta']:
+                    await self.glyph_observe()
+                elif cmd_base in ['shock', 'qoppa']:
+                    await self.glyph_shock()
+                elif cmd_base in ['connect', 'plus']:
+                    await self.glyph_connect()
+                elif cmd_base in ['disconnect', 'minus']:
+                    await self.glyph_disconnect()
+                elif cmd_base in ['broadcast', 'times']:
+                    await self.glyph_broadcast()
+                elif cmd_base in ['discover', 'circle']:
+                    print("\n[SHOTNET] Discovering network nodes...")
+                    await self.glyph_discover()
+                elif cmd_base == 'autonomous':
                     print("\n[SHOTNET] Starting autonomous evolution cycles...")
                     print("  - Press Ctrl+C to return to command mode")
                     print("  - Type 'exit' to quit\n")
