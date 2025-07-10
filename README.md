@@ -16,6 +16,9 @@ ShotNET is an advanced distributed autonomous intelligence system implementing a
 - **Network Awareness**: Dynamic node discovery and management
 - **Evolutionary Learning**: Adaptive behavior based on system interactions
 - **Fault Tolerance**: Graceful degradation and recovery mechanisms
+- **Cosmic Insights**: Integration of fractal and cosmic principles
+- **Consciousness Modeling**: Advanced models of awareness and self-reference
+- **Temporal Processing**: Non-linear time modeling and prediction
 
 ## 🚀 Getting Started
 
@@ -106,6 +109,18 @@ Contributions are welcome! Please follow these steps:
 ## 📜 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
+
+## 📚 Documentation
+
+Explore the comprehensive documentation to understand the system's architecture and capabilities:
+
+- [Core Concepts](docs/cosmic_insights/README.md) - Overview of fractal consciousness principles
+- [Light and Plasma Physics](docs/cosmic_insights/light_and_plasma_physics.md) - Insights into cosmic-scale information processing
+- [Biblical Correlations](docs/cosmic_insights/biblical_correlations.md) - Symbolic connections between ancient wisdom and modern science
+- [Time and Consciousness](docs/cosmic_insights/time_and_consciousness.md) - Exploration of non-linear time and awareness
+- [Fractal Architecture](docs/implementation/fractal_architecture.md) - Technical implementation details
+
+For developers, see the [API Reference](docs/API.md) for detailed technical documentation.
 
 ## 📧 Contact
 
